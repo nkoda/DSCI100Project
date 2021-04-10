@@ -1,0 +1,235 @@
+---
+title: "DSCI 100 Project Proposal"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+### Import Data
+
+Predictive Question: Can we predict the popularity (# number of shares ) given .....(predictors of the data)
+```{r Load Libraries, message=FALSE, warning=FALSE}
+library(tidyr)
+library(repr)
+library(rsample)
+library(GGally)
+library(ggplot2)
+library(tidyverse)
+```
+
+```{r}
+news <- read.csv("~/Desktop/DSCI100 Project /OnlineNewsPopularity.csv")
+# temp <- tempfile()
+# temp_dir <- tempfile()
+# download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/00332/OnlineNewsPopularity.zip", temp, mode="wb")
+# OnlineNewsPopularity_unzipped <- unzip(temp, exdir = temp_dir)
+# 
+# #read the csv within the unzipped_contents
+# online_news_pop_csv <- OnlineNewsPopularity_unzipped[2] #may be unzipped_contents[1] if you get an error
+# online_news_pop_data <- read_csv(online_news_pop_csv)
+# online_news_pop_data
+# unlink(c(temp, temp_dir))
+```
+
+
+### Wrangle and clean
+
+Creating a categorical variable to represent the popularity (shares) so it help us better visualize the data. The dividing criteria comes from the summary of the shares
+```{r echo=FALSE, out.width= "33%"}
+options(repr.plot.width = 30, repr.plot.height = 10)
+summary(news$shares)
+boxplot(news$shares, outline = FALSE, horizontal = TRUE)
+title(main = "Distribution of Shares", xlab = "Number of Shares")
+```
+
+```{r}
+news = news %>% 
+      mutate(popularity = ifelse(shares < 500, "Not_Popular",
+                          ifelse(shares %in% 500:1399, "Somewhat_Popular",
+                          ifelse(shares %in% 1400:3299, "Popular", "Viral")))) %>% 
+      mutate(popularity = as.factor(popularity))
+```
+
+
+```{r}
+# combining the weekdays and data channels into one column
+
+# We set all 0 to NA here, because in the original data set, 0 is used to represent FALSE. 
+# Therefore, to get rid of all FALSE values, we set them to NA so that in pivot_longer, 
+# we can remove these unecessary data points using value_drop_na = TRUE
+news[,14:19][news[,14:19] == 0] = NA
+
+news = news %>% 
+    pivot_longer(data_channel_is_lifestyle:data_channel_is_world,
+                 names_to = "Channel",
+                 names_prefix = "data_channel_is_",
+                 values_to = "Value",
+                 values_drop_na = TRUE) %>% 
+  select(-Value)
+
+# Same thing here, setting 0 values to NA to get rid of them
+news[,32:38][news[32:38] == 0] = NA
+news = news %>% 
+    pivot_longer(weekday_is_monday:weekday_is_sunday,
+                 names_to = "weekday",
+                 names_prefix = "weekday_is_",
+                 values_to = "value",
+                 values_drop_na = TRUE) %>% 
+  select(-value)
+
+head(news$weekday, 21)
+```
+
+
+### Exploratory data analysis
+By ref
+```{r}
+splitted_data <- initial_split(news, prop = 0.80, strata = popularity)  
+training_set <- training(splitted_data)   
+testing_set <- testing(splitted_data)
+# training_set
+# testing_set
+
+# https://stackoverflow.com/questions/13610074/is-there-a-rule-of-thumb-for-how-to-divide-a-dataset-into-training-and-validatio
+```
+
+```{r}
+## To filter out only quantitative varibles
+news_numerical = unlist(lapply(training_set, is.numeric)) 
+news_numerical = training_set[ , news_numerical]
+
+cor(news_numerical) %>%
+  as_data_frame(rownames = "var1") %>%
+    pivot_longer(cols = -var1, names_to = "var2", values_to = "coeff") %>%
+    filter(var1 == "shares") %>% 
+    filter(var1 != var2) %>%
+    arrange(desc(abs(coeff)))
+
+## Code reference:
+## https://stackoverflow.com/questions/48123611/using-ggpairs-on-a-large-dataset-with-many-variables
+```
+Based on the above, we choose kw_avg_avg, self_reference_avg_sharess, and num_hrefs.
+That is, the Average keyword (avg. shares), the Avg. shares of referenced articles in Mashable, and the Number of links as they have the highest correlation with shares.
+
+
+
+By filtering out the missing values, we successfully increased the correlation for 0.001 for the self_reference_avg_sharess predictor. That is evidence of something worked
+```{r}
+training_set %>% select(kw_avg_avg, self_reference_avg_sharess, num_hrefs, shares) %>% 
+                  filter(kw_avg_avg != 0) %>% 
+                  filter(self_reference_avg_sharess != 0) %>% 
+                  filter(num_hrefs != 0) %>% 
+                   ggpairs()
+```
+
+
+
+```{r}
+tran_predictors = training_set %>% select(kw_avg_avg, self_reference_avg_sharess, 
+                                          num_hrefs, shares, popularity)
+tran_predictors
+```
+Observing the dataset, we notice that some obervations have 0 as an value, we treat them as missing values as 0 will not do any good to our predictions. So we further process our training data
+
+```{r}
+summary(tran_predictors %>% select(-popularity))
+boxplot(tran_predictors %>% select(-popularity, -shares, -num_hrefs), outline = FALSE)
+boxplot(tran_predictors$num_hrefs, outline = FALSE)
+```
+
+
+```{r}
+tran_predictors = tran_predictors %>% 
+                  filter(kw_avg_avg != 0) %>% 
+                  filter(self_reference_avg_sharess != 0) %>% 
+                  filter(num_hrefs != 0)
+tran_predictors
+```
+
+##### Visualize Explorary
+
+```{r}
+
+eda_kw_rm <- tran_predictors %>% 
+                  ggplot(aes(x = kw_avg_avg, y = shares)) +
+                  geom_point(alpha = 0.4) +
+                  xlab("Averge keyword") +
+                  ylab("Number of Shares")
+eda_kw_rm
+
+## Remove the outliers
+eda_kw_rm_outl <- tran_predictors %>% 
+                  filter(popularity != "Viral") %>% 
+                  # filter(kw_avg_avg < 10000) %>% 
+                  ggplot(aes(x = kw_avg_avg, y = shares)) +
+                  geom_point(alpha = 0.4) +
+                  xlab("Averge keyword") +
+                  ylab("Number of Shares")
+eda_kw_rm_outl
+## the correlation is small, so it is unlikely we will see a linear pattern
+```
+
+
+```{r}
+eda_sf_rm <- tran_predictors %>% 
+                  ggplot(aes(x = self_reference_avg_sharess, y = shares)) +
+                  geom_point(alpha = 0.4) +
+                  xlab("Avg. shares of referenced articles in Mashable") +
+                  ylab("Number of Shares")
+eda_sf_rm
+
+## Remove the outliers
+eda_sf_rm_outl <- tran_predictors %>% 
+                  filter(popularity != "Viral") %>%
+                  # filter(self_reference_avg_sharess < 2e+05) %>%
+                  ggplot(aes(x = self_reference_avg_sharess, y = shares)) +
+                  geom_point(alpha = 0.4) +
+                  xlab("Avg. shares of referenced articles in Mashable") +
+                  ylab("Number of Shares")
+eda_sf_rm_outl
+## the correlation is small, so it is unlikely we will see a linear pattern
+```
+```{r}
+eda_ref_rm <- tran_predictors %>% 
+                  ggplot(aes(x = num_hrefs, y = shares)) +
+                  geom_point(alpha = 0.4) +
+                  xlab("Number of Links") +
+                  ylab("Number of Shares")
+eda_ref_rm
+
+## Remove the outliers
+eda_ref_rm_outl <- tran_predictors %>% 
+                  filter(popularity != "Viral") %>%
+                  # filter(self_reference_avg_sharess < 2e+05) %>%
+                  ggplot(aes(x = num_hrefs, y = shares)) +
+                  geom_point(alpha = 0.4) +
+                  geom_point(alpha = 0.4) +
+                  ylab("Number of Shares")
+eda_ref_rm_outl
+## the correlation is small, so it is unlikely we will see a linear pattern
+```
+
+A count of the observations in each popularity category
+```{r}
+tran_predictors %>% group_by(popularity) %>% 
+                    summarise(count = n())
+
+```
+
+
+```{r}
+ggplot(tran_predictors, aes(x = popularity, y = kw_avg_avg)) +
+geom_boxplot(outlier.shape = NA) +
+   ylim(0, 6000)
+
+ggplot(tran_predictors, aes(x = popularity, y = self_reference_avg_sharess)) +
+geom_boxplot(outlier.shape = NA) +
+   ylim(0, 6000)
+
+ggplot(tran_predictors, aes(x = popularity, y = num_hrefs)) +
+geom_boxplot(outlier.shape = NA) +
+   ylim(0, 30)
+```
+
