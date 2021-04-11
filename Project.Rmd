@@ -1,9 +1,9 @@
 ---
 title: "DSCI 100 Project Proposal"
 output:
-  pdf_document: default
   html_document:
     df_print: paged
+  pdf_document: default
   html_notebook: default
 ---
 
@@ -17,6 +17,8 @@ library(rsample)
 library(GGally)
 library(ggplot2)
 library(tidyverse)
+library(tidymodels)
+library(kknn)
 ```
 
 ```{r}
@@ -148,6 +150,14 @@ tran_predictors = tran_predictors %>%
 tran_predictors
 ```
 
+We noticed that there are duplicated rows in the tran_predictors, so we want to remove them her. The duplication is probabily caused by some categorical variables that is not selected in train_predictors
+```{r}
+tran_predictors = tran_predictors %>% distinct()
+tran_predictors
+```
+
+
+
 ##### Visualize Explorary
 
 ```{r}
@@ -205,14 +215,16 @@ eda_ref_rm_outl <- tran_predictors %>%
                   # filter(self_reference_avg_sharess < 2e+05) %>%
                   ggplot(aes(x = num_hrefs, y = shares)) +
                   geom_point(alpha = 0.4) +
-                  geom_point(alpha = 0.4) +
                   ylab("Number of Shares")
 eda_ref_rm_outl
 ## the correlation is small, so it is unlikely we will see a linear pattern
 ```
 
 A count of the observations in each popularity category
+
+
 ```{r}
+## the kappa
 tran_predictors %>% group_by(popularity) %>% 
                     summarise(count = n())
 
@@ -233,3 +245,156 @@ geom_boxplot(outlier.shape = NA) +
    ylim(0, 30)
 ```
 
+### KNN regression analysis
+
+```{r}
+## Now we know which predictors we need and what kind of outliers & missing values to remove,
+## We retrain our data based on those info
+
+news_processed = news %>% 
+                select(kw_avg_avg, self_reference_avg_sharess, num_hrefs, shares) %>% 
+                filter(kw_avg_avg != 0) %>% 
+                filter(self_reference_avg_sharess != 0) %>% 
+                filter(num_hrefs != 0) %>% 
+                distinct()
+head(news_processed)
+
+## Re-train our data in a regression manner
+
+splitted_data <- initial_split(news_processed, prop = 0.80, strata = shares)  
+train <- training(splitted_data)   
+test <- testing(splitted_data)
+head(train)
+head(test)
+
+```
+
+
+```{r}
+
+news_knn_recipe = recipe(shares ~ ., data = train)
+
+news_knn_recipe
+
+news_knn_spec = nearest_neighbor(weight_func = "rectangular", neighbors = tune()) %>% 
+                set_engine("kknn") %>%
+                set_mode("regression")
+
+news_knn_spec
+```
+
+
+```{r}
+news_vfold = vfold_cv(train, v = 5, strata = shares)
+
+news_vfold
+
+news_knn_workflow = workflow() %>% 
+                    add_recipe(news_knn_recipe) %>%
+                    add_model(news_knn_spec)
+
+news_knn_workflow
+
+```
+
+
+```{r}
+gridvals = tibble(neighbors = 1:20)
+
+news_knn_results = news_knn_workflow %>% 
+                    tune_grid(resamples = news_vfold, grid = gridvals) %>%
+                    collect_metrics()
+
+news_knn_results
+
+```
+
+
+```{r}
+knn_rmspe = news_knn_results %>% 
+            filter(.metric == "rmse") %>% 
+            select(mean) %>% 
+            arrange(mean) %>% 
+            slice(1) %>% 
+            pull()
+            
+knn_rmspe
+```
+So we get a knn regression with a RMSPE of 10356.13. We will then try to use linear regression to see which one is better
+
+### Linear Regression
+```{r}
+lm_spec = linear_reg() %>% 
+          set_engine("lm") %>% 
+          set_mode("regression")
+
+news_recipe = recipe(shares ~ ., data = train) 
+
+news_lm_fit = workflow() %>% 
+        add_recipe(news_recipe) %>% 
+        add_model(lm_spec) %>% 
+        fit(data = train)
+
+news_lm_fit
+```
+
+```{r}
+news_lm_pred = news_lm_fit %>% 
+              predict(test) %>% 
+              bind_cols(test)
+news_lm_pred
+
+news_lm_rmspe =  news_lm_pred %>% 
+        metrics(truth = shares, estimate = .pred) %>% 
+        filter(.metric == "rmse") %>% 
+        select(.estimate) %>% 
+        pull()
+news_lm_rmspe
+```
+
+### Compare knn and linear
+```{r}
+if(knn_rmspe < news_lm_rmspe){
+  print("We use knn-regresion as it has a smaller RMSPE")
+} else{
+  print("we use simple linear regression as it has a smaller RMSPE")
+}
+knn_rmspe
+news_lm_rmspe
+```
+
+### Visualization of our prediction
+
+```{r}
+lmplot <- lm(shares ~ ., data = news_processed)
+summary(lmplot)
+plot(lmplot)
+## https://rpubs.com/bensonsyd/385183
+```
+
+```{r}
+lm_kw = news_lm_pred %>% 
+        ggplot(aes(x = kw_avg_avg, y = shares)) +
+        geom_point(alpha = 0.5) + 
+        geom_smooth(method = "lm", se = FALSE) +
+        labs(x = "Averge Keyword")
+lm_kw
+        
+
+lm_kw_zm = news_lm_pred %>% 
+        filter(kw_avg_avg < 10000) %>% 
+        filter(shares < 1e+05) %>% 
+        ggplot(aes(x = kw_avg_avg, y = shares)) +
+        geom_point(alpha = 0.5) + 
+        geom_smooth(method = "lm", se = FALSE)
+lm_kw_zm
+
+```
+
+
+### Discussion
+
+
+* Our guess is that the prediction will not work very well as the correlation between our predictors and the response variable shares are extremely low: the highest of the three is around 0.1. Therefore, we are not suprised that ...
+* Regardless of our accuracy in predicting the popularity of a facebook share given some attributes of the post, some people is going to be crazy about it. Popular posts ~> influencers or even internet celebrities ~> tons of money ~> no matter how unreliable the methods are and how mere the chances are, they will give it a try. 
+* Future questions: Are there any correlations among the predictors themselves? If individually, the predictors have a low correlation with the response variable, how about all together? Or some of them together? 
